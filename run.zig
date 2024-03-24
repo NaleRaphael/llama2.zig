@@ -224,13 +224,13 @@ pub const TokenIndex = struct {
 pub const Tokenizer = struct {
     vocab: [][]u8 = undefined,
     vocab_scores: []f32 = undefined,
-    sorted_vocab: *TokenIndex = undefined,
+    sorted_vocab: ?[]TokenIndex = null,
     vocab_size: i32 = undefined,
     max_token_length: u32 = undefined,
     byte_pieces: [512]u8 = undefined, // stores all single-byte strings
 
     pub fn init(tokenizer_path: []const u8, vocab_size: i32, allocator: Allocator) !Tokenizer {
-        var t: Tokenizer = undefined;
+        var t = Tokenizer{};
 
         // NOTE: vocab_size might be written into tokenizer file in the future,
         // then we could change this accordingly.
