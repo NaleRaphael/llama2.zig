@@ -217,12 +217,12 @@ fn freeTransformer(transformer: *Transformer, allocator: Allocator) void {
 }
 
 pub const TokenIndex = struct {
-    str: *u8,
+    str: *const [:0]u8,
     id: i32,
 };
 
 pub const Tokenizer = struct {
-    vocab: [][]u8 = undefined,
+    vocab: [][:0]u8 = undefined,
     vocab_scores: []f32 = undefined,
     sorted_vocab: ?[]TokenIndex = null,
     vocab_size: i32 = undefined,
@@ -237,7 +237,7 @@ pub const Tokenizer = struct {
         t.vocab_size = vocab_size;
 
         const n_vocab: usize = @intCast(vocab_size);
-        t.vocab = try allocator.alloc([]u8, n_vocab);
+        t.vocab = try allocator.alloc([:0]u8, n_vocab);
         t.vocab_scores = try allocator.alloc(f32, n_vocab);
 
         for (0..256) |i| {
@@ -278,13 +278,12 @@ pub const Tokenizer = struct {
             len = @bitCast(buf_x32);
 
             // token
-            t.vocab[i] = try allocator.alloc(u8, @intCast(len));
+            t.vocab[i] = try allocator.allocSentinel(u8, @intCast(len), '\x00');
             nb_read = try buffered_file.read(t.vocab[i]);
             if (nb_read != len) {
                 std.debug.print("failed read\n", .{});
                 return std.fs.File.ReadError.Unexpected;
             }
-            // TODO: should we add null terminating character at the end of a vocab?
         }
 
         return t;
@@ -296,11 +295,57 @@ pub const Tokenizer = struct {
         }
         allocator.free(self.vocab);
         allocator.free(self.vocab_scores);
+
+        if (self.sorted_vocab != null) {
+            allocator.free(self.sorted_vocab.?);
+        }
+    }
+
+    pub fn encode(
+        self: *Tokenizer,
+        text: []const u8,
+        bos: u8,
+        eos: u8,
+        tokens: *[]i32,
+        allocator: Allocator,
+    ) !u32 {
+        _ = tokens;
+        _ = eos;
+        _ = bos;
+        _ = text;
+
+        if (self.sorted_vocab == null) {
+            // lazily initialize the vocabulary
+            const n_vocab: usize = @intCast(self.vocab_size);
+            self.sorted_vocab = try allocator.alloc(TokenIndex, n_vocab);
+            for (0..n_vocab) |i| {
+                self.sorted_vocab.?[i] = TokenIndex{
+                    .str = &self.vocab[i],
+                    .id = @intCast(i),
+                };
+            }
+
+            // sort vocab
+            std.sort.pdq(TokenIndex, self.sorted_vocab.?, {}, compareToken);
+        }
+
+        return 0;
     }
 };
 
-pub fn compareToken(a: *const TokenIndex, b: *const TokenIndex) bool {
-    return a.str == b.str;
+// Compare string like how `strcmp` in C works. Note that inputs should be null
+// terminated.
+pub fn strcmp(a: [*]const u8, b: [*]const u8) bool {
+    var i: usize = 0;
+    while (a[i] != 0 and a[i] == b[i]) {
+        i += 1;
+    }
+    return a[i] < b[i];
+}
+
+pub fn compareToken(context: void, a: TokenIndex, b: TokenIndex) bool {
+    _ = context;
+    return strcmp(a.str.ptr, b.str.ptr);
 }
 
 pub fn buildTokenizer(
@@ -387,10 +432,10 @@ pub fn main() !void {
     var temperature: f32 = 1.0;
     var topp: f32 = 0.9;
     var steps: u32 = 256;
-    var prompt: []u8 = undefined;
+    var prompt: []u8 = "";
     var rng_seed: u64 = 0;
-    var mode: []u8 = undefined;
-    var system_prompt: []u8 = undefined;
+    var mode: []u8 = "";
+    var system_prompt: []u8 = "";
 
     var i: usize = 2;
     while (i < args.len) : (i += 2) {
