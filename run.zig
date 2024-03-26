@@ -217,12 +217,12 @@ fn freeTransformer(transformer: *Transformer, allocator: Allocator) void {
 }
 
 pub const TokenIndex = struct {
-    str: *const [:0]u8,
-    id: i32,
+    str: []const u8,
+    id: u32,
 };
 
 pub const Tokenizer = struct {
-    vocab: [][:0]u8 = undefined,
+    vocab: [][]u8 = undefined,
     vocab_scores: []f32 = undefined,
     sorted_vocab: ?[]TokenIndex = null,
     vocab_size: i32 = undefined,
@@ -237,7 +237,7 @@ pub const Tokenizer = struct {
         t.vocab_size = vocab_size;
 
         const n_vocab: usize = @intCast(vocab_size);
-        t.vocab = try allocator.alloc([:0]u8, n_vocab);
+        t.vocab = try allocator.alloc([]u8, n_vocab);
         t.vocab_scores = try allocator.alloc(f32, n_vocab);
 
         for (0..256) |i| {
@@ -278,7 +278,14 @@ pub const Tokenizer = struct {
             len = @bitCast(buf_x32);
 
             // token
-            t.vocab[i] = try allocator.allocSentinel(u8, @intCast(len), '\x00');
+            // NOTE: here we make use of zig's slice since it contains length
+            // information of a sequence, so we don't need to append a sentinel
+            // ('\x00') to the end of a string. However, if we do need it, we
+            // can call `allocator.allocSentinel()` to allocate a buffer which
+            // ends with a sentinel while the sentinel char is not counted into
+            // `buffer.len` (this is useful for reading data in zig style since
+            // the number of bytes to read is determined by length of the buffer).
+            t.vocab[i] = try allocator.alloc(u8, @intCast(len));
             nb_read = try buffered_file.read(t.vocab[i]);
             if (nb_read != len) {
                 std.debug.print("failed read\n", .{});
@@ -320,7 +327,7 @@ pub const Tokenizer = struct {
             self.sorted_vocab = try allocator.alloc(TokenIndex, n_vocab);
             for (0..n_vocab) |i| {
                 self.sorted_vocab.?[i] = TokenIndex{
-                    .str = &self.vocab[i],
+                    .str = self.vocab[i],
                     .id = @intCast(i),
                 };
             }
@@ -333,19 +340,41 @@ pub const Tokenizer = struct {
     }
 };
 
-// Compare string like how `strcmp` in C works. Note that inputs should be null
-// terminated.
-pub fn strcmp(a: [*]const u8, b: [*]const u8) bool {
+// Compare strings like how `strcmp` works in C. Note that this implementation
+// does not rely on null terminator, but it relies on how `slice` works in zig
+// as it provides length infomation of a sequence.
+pub fn strcmp(a: []const u8, b: []const u8) i32 {
     var i: usize = 0;
-    while (a[i] != 0 and a[i] == b[i]) {
+    while (i < a.len and i < b.len) {
+        if (a[i] != b[i]) {
+            return @as(i32, a[i]) - @as(i32, b[i]);
+        }
         i += 1;
     }
-    return a[i] < b[i];
+    // Now, we ran out of characters from either a or b. So we just need to
+    // check with the lengths of them.
+    const len_a: i32 = @intCast(a.len);
+    const len_b: i32 = @intCast(b.len);
+    return len_a - len_b;
 }
 
+// Compare 2 `TokenIndex`s. True: a < b; False: a >= b.
 pub fn compareToken(context: void, a: TokenIndex, b: TokenIndex) bool {
     _ = context;
-    return strcmp(a.str.ptr, b.str.ptr);
+    return strcmp(a.str, b.str) < 0;
+}
+
+// Compare 2 `TokenIndex`s and return `math.Order`.
+pub fn compareToken2(context: void, a: TokenIndex, b: TokenIndex) std.math.Order {
+    _ = context;
+    const res = strcmp(a.str, b.str);
+    if (res < 0) {
+        return std.math.Order.lt;
+    } else if (res == 0) {
+        return std.math.Order.eq;
+    } else {
+        return std.math.Order.gt;
+    }
 }
 
 pub fn buildTokenizer(
