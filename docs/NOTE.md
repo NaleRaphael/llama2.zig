@@ -73,4 +73,34 @@ var nb_read = try buffered_file.read(&buf_x32);
 // Convert bytes to single i32 (endianness should be considered)
 var value: i32 = std.mem.readIntSliceLittle(u32, &buf_x32);
 ```
+- `null-terminated string` vs `slice (pointer + length)`?
+    > ref: https://news.ycombinator.com/item?id=33231837
 
+### Test
+- To verify the implementation of bytes-to-UTF8, we can try setting prompt with
+    non-ASCII strings, e.g.,
+    ```bash
+    # prompt: "good morning" in Russian
+    ./run stories15M.bin \
+        -t 0.8 \
+        -n 1 \
+        -z tokenizer.bin \
+        -i "Доброе утро"
+    ```
+    Also, we need to cast `char` to `unsigned char` in C to print correct code
+    points:
+    ```c
+    // llama2.c/run.c::encode()
+    for (char *c = text; *c != '\0'; c++) {
+        printf("%d ", ((unsigned char)*c));
+    }
+    ```
+    Expected encoded result:
+    ```raw
+    1 1453 4389 18805 863 9934
+    1456: "Д"
+    4389: "об"
+    18805: "рое"
+    863: " у"
+    9934: "тро"
+    ```

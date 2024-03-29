@@ -308,19 +308,24 @@ pub const Tokenizer = struct {
         }
     }
 
+    pub fn strLookup(self: Tokenizer, str: []const u8) ?u32 {
+        const tok = TokenIndex{ .str = str, .id = undefined };
+        // NOTE: `bsearch` in C returns a pointer, this returns an index.
+        const res = std.sort.binarySearch(TokenIndex, tok, self.sorted_vocab.?, {}, compareToken2);
+
+        const idx = res orelse return null;
+        const tok_id = self.sorted_vocab.?[idx].id;
+        return tok_id;
+    }
+
     pub fn encode(
         self: *Tokenizer,
         text: []const u8,
-        bos: u8,
-        eos: u8,
-        tokens: *[]i32,
+        bos: bool,
+        eos: bool,
+        tokens: []u32,
         allocator: Allocator,
     ) !u32 {
-        _ = tokens;
-        _ = eos;
-        _ = bos;
-        _ = text;
-
         if (self.sorted_vocab == null) {
             // lazily initialize the vocabulary
             const n_vocab: usize = @intCast(self.vocab_size);
@@ -336,7 +341,147 @@ pub const Tokenizer = struct {
             std.sort.pdq(TokenIndex, self.sorted_vocab.?, {}, compareToken);
         }
 
-        return 0;
+        // (llama2.c) Temporary buffer to store merge candidates of always two
+        // consecutive tokens. *2 for concat, +1 for null terminator, +2 for
+        // UTF8 (in case max_token_length is 1).
+        var str_buffer = try allocator.alloc(u8, self.max_token_length * 2 + 1 + 2);
+        defer allocator.free(str_buffer);
+
+        var str_len: usize = 0;
+        var n_tokens: u32 = 0; // retval
+
+        if (bos) {
+            tokens[n_tokens] = 1;
+            n_tokens += 1;
+        }
+
+        // add dummy prefix
+        // TODO: need to read through source code of sentencepice to figure out
+        // how it work properly.
+        if (text.len != 0) {
+            const dummy_prefix = self.strLookup(" ").?;
+            tokens[n_tokens] = dummy_prefix;
+            n_tokens += 1;
+        }
+
+        // process the raw (UTF-8) byte sequence of the input string
+        for (0..text.len) |i| {
+            const c = text[i];
+
+            // Check whether the highest 2 bits are 10 (0b10xxxxxx)
+            // mask: 0xC0 (0b11000000)
+            if ((c & 0xC0) != 0x80) {
+                str_len = 0;
+            }
+
+            str_buffer[str_len] = c;
+            str_len += 1;
+            // NOTE: we don't need to set the last byte to null everytime here,
+            // check out the comment related to `strLookup` below.
+            // str_buffer[str_len] = '\x00';
+
+            // NOTE: we will peek the next byte in text, so we need to make
+            // sure the index won't exceed the length of it. (in llama2.c, this
+            // loop checks with null terminator, so it doesn't need to do so)
+            if ((i + 1) < text.len and (text[i + 1] & 0xC0) == 0x80 and str_len < 4) {
+                continue;
+            }
+
+            // NOTE: (IMPORTANT!) since our implementation of `strcmp` checks
+            // with length of string instead of the null terminator, we need to
+            // pass a `slice` instead of the whole buffer to search.
+            const lookup_result = self.strLookup(str_buffer[0..str_len]);
+            if (lookup_result != null) {
+                tokens[n_tokens] = lookup_result.?;
+                n_tokens += 1;
+            } else {
+                // fallback: encode each byte literally
+                for (0..str_len) |j| {
+                    // +3: offset for the first 3 vocabs (<unk>, <s>, </s>)
+                    tokens[n_tokens] = str_buffer[j] + 3;
+                    n_tokens += 1;
+                }
+            }
+            str_len = 0;
+        }
+
+        while (true) {
+            var best_score: f32 = -std.math.inf(f32);
+            var best_id: ?u32 = null;
+            var best_idx: ?usize = null;
+
+            for (0..(n_tokens - 1)) |i| {
+                const token1 = self.vocab[tokens[i]];
+                const token2 = self.vocab[tokens[i + 1]];
+                _ = try std.fmt.bufPrint(str_buffer, "{s}{s}", .{ token1, token2 });
+                var len = token1.len + token2.len;
+
+                const lookup_result = self.strLookup(str_buffer[0..len]);
+                if (lookup_result != null and self.vocab_scores[lookup_result.?] > best_score) {
+                    const id = lookup_result.?;
+                    best_score = self.vocab_scores[id];
+                    best_id = id;
+                    best_idx = i;
+                }
+            }
+
+            if (best_idx == null) {
+                break; // cannot find any more pairs to merge, so quit this loop
+            }
+
+            // merge the consecutive pair (best_idx, best_idx+1) into new token best_id
+            tokens[best_idx.?] = best_id.?;
+            // delete token at position best_idx+1, shift the entire sequence back 1
+            for ((best_idx.? + 1)..(n_tokens - 1)) |i| {
+                tokens[i] = tokens[i + 1];
+            }
+            n_tokens -= 1;
+        }
+
+        if (eos) {
+            tokens[n_tokens] = 2;
+            n_tokens += 1;
+        }
+
+        return n_tokens;
+    }
+
+    // XXX: if `self` is not specified as a pointer here, the returned value
+    // will be empty (might be a garbage value once input token is 0~255 and it's
+    // @constCast() from `byte_pieces` after leaving this scope?)
+    pub fn decode(self: *Tokenizer, prev_token: u32, token: u32) []u8 {
+        const piece = self.vocab[token];
+        var offset: usize = 0;
+
+        // TODO: check whether we can simplify code below since 0~255 would be
+        // in the form of "<0x__>", so that we can skip the parsing work once
+        // we found the first byte on `piece` is a spce.
+        if (prev_token == 1 and piece[0] == ' ') {
+            offset += 1;
+        }
+
+        // In llama2.c, `piece` is checked with pattern "<0x%02hhX>", and it
+        // can be breakdown into:
+        // - "<0x": literally matching these characters
+        // - "%02hhX": matching a 2-digit number
+        //   - "02": 2-digit number, padding with 0 if necessary
+        //   - "hh": these 2-digit number are 2-byte variable
+        //   - "X": interprete this 2-digit number as a hexadecimal number
+        // - ">": literally matching it
+        var voc = piece[offset..]; // TODO: try to avoid this, this create a new piece of memory
+        if (voc.len == 6 and voc[0] == '<' and voc[5] == '>') {
+            const byte_val: u8 = std.fmt.parseUnsigned(u8, voc[1..5], 0) catch |err| switch (err) {
+                else => {
+                    std.log.err("Failed to parse vocen, id: {d}\n", .{voc});
+                    return voc;
+                },
+            };
+            voc = @constCast(self.byte_pieces[byte_val][0..]);
+            // std.debug.print("decode - byte_val: {u}\n", .{byte_val});
+            // std.debug.print("decode - voc: {s}\n", .{voc});
+        }
+
+        return voc;
     }
 };
 
@@ -461,10 +606,10 @@ pub fn main() !void {
     var temperature: f32 = 1.0;
     var topp: f32 = 0.9;
     var steps: u32 = 256;
-    var prompt: []u8 = "";
+    var prompt: []const u8 = "";
     var rng_seed: u64 = 0;
-    var mode: []u8 = "";
-    var system_prompt: []u8 = "";
+    var mode: []const u8 = "generate";
+    var system_prompt: []const u8 = "";
 
     var i: usize = 2;
     while (i < args.len) : (i += 2) {
