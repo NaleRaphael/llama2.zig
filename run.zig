@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 // Helper function for development
 fn printStruct(s: anytype) void {
@@ -97,8 +98,8 @@ const RunState = struct {
     // kv caches.
     // https://github.com/karpathy/llama2.c/blob/b3c4b6c/run.c#L255-L257
     // https://github.com/karpathy/llama2.c/pull/400
-    // k: []f32, // key (dim,)
-    // v: []f32, // value (dim,)
+    k: []f32 = undefined, // key (dim,)
+    v: []f32 = undefined, // value (dim,)
     att: []f32, // buffer for scores/attention values (n_heads, seq_len)
     logits: []f32, // output logits, distribution of vocabulary (vocab_size)
     key_cache: []f32, // (layer, seq_len, dim)
@@ -145,6 +146,7 @@ const RunState = struct {
     }
 };
 
+// ----------------------------------------------------------------------
 pub const Transformer = struct {
     config: Config = undefined,
     weights: TransformerWeights = undefined,
@@ -154,7 +156,197 @@ pub const Transformer = struct {
     fd: std.fs.File = undefined,
     data: *anyopaque = undefined,
     file_size: u64 = undefined,
+
+    pub fn forward(self: *Transformer, token: u32, pos: u32) []f32 {
+        const p = self.config;
+        const w = self.weights;
+        var s = self.state;
+        var x = s.x;
+        const dim: usize = @intCast(p.dim);
+        const hidden_dim: usize = @intCast(p.hidden_dim);
+        const n_layers: usize = @intCast(p.n_layers);
+        const n_heads: usize = @intCast(p.n_heads);
+        const n_kv_heads: usize = @intCast(p.n_kv_heads);
+        const vocab_size: usize = @intCast(p.vocab_size);
+        const seq_len: usize = @intCast(p.seq_len);
+        const kv_dim: usize = (dim * n_kv_heads) / n_heads;
+        const kv_mul: usize = n_heads / n_kv_heads; // integer multiplier of the kv sharing in multiquery
+        const head_size: usize = dim / n_heads;
+
+        const content_row = w.token_embedding_table[(dim * token)..(dim * (token + 1))];
+        @memcpy(x, content_row);
+
+        // forward all the layers
+        for (0..n_layers) |l| {
+            // attention rmsnorm
+            rmsnorm(s.xb, x, w.rms_att_weight[l * dim .. (l + 1) * dim]);
+
+            // key and value point to the kv cache
+            const loff = l * seq_len * kv_dim;
+            s.k = s.key_cache[(loff + pos * kv_dim)..(loff + (pos + 1) * kv_dim)];
+            s.v = s.value_cache[(loff + pos * kv_dim)..(loff + (pos + 1) * kv_dim)];
+
+            // op: `xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)`
+            // src: Attention.forward()
+            matmul(s.q, s.xb, w.wq[l * dim * dim .. (l + 1) * dim * dim], dim, dim);
+            matmul(s.k, s.xb, w.wk[l * dim * kv_dim .. (l + 1) * dim * kv_dim], dim, kv_dim);
+            matmul(s.v, s.xb, w.wv[l * dim * kv_dim .. (l + 1) * dim * kv_dim], dim, kv_dim);
+
+            // RoPE relative positional encoding
+            var j: usize = 0;
+            while (j < dim) : (j += 2) {
+                const head_dim: f32 = @floatFromInt(j % head_size);
+                const freq: f32 = 1.0 / std.math.pow(f32, 10000.0, head_dim / @as(f32, @floatFromInt(head_size)));
+                const val: f32 = @as(f32, @floatFromInt(pos)) * freq;
+                const fcr = std.math.cos(val);
+                const fci = std.math.sin(val);
+                const rotn: usize = if (j < kv_dim) 2 else 1; // how many vectors? 2 = q & k, 1 = q only
+                for (0..rotn) |v| {
+                    const vec = if (v == 0) s.q else s.k;
+                    const v0 = vec[j];
+                    const v1 = vec[j + 1];
+                    vec[j] = v0 * fcr - v1 * fci;
+                    vec[j + 1] = v0 * fci + v1 * fcr;
+                }
+            }
+
+            // multihead attention. iterate over all heads
+            for (0..n_heads) |h| {
+                // get the query vector for this head
+                const q = s.q[h * head_size .. (h + 1) * head_size];
+                // attention scores for this head
+                const att = s.att[h * seq_len .. (h + 1) * seq_len];
+                // iterate over all timesteps, including the current one
+                for (0..pos + 1) |t| {
+                    const il: usize = loff + t * kv_dim + (h / kv_mul) * head_size;
+                    const ir = il + head_size;
+                    const k = s.key_cache[il..ir];
+                    var score: f32 = 0.0;
+                    for (0..head_size) |i| {
+                        score += q[i] * k[i];
+                    }
+                    score /= std.math.sqrt(@as(f32, @floatFromInt(head_size)));
+                    att[t] = score;
+                }
+
+                // softmax the scores to get attention weights, from 0..pos inclusively
+                // NOTE: in `Attention.forward()::model.py`, this works with a mask of
+                // upper triangular matrix filling with -inf.
+                softmax(att[0 .. pos + 1]);
+
+                // weighted sum of the values, store back into xb
+                var xb = s.xb[h * head_size .. (h + 1) * head_size];
+                @memset(xb, 0.0);
+                for (0..pos + 1) |t| {
+                    const il: usize = loff + t * kv_dim + (h / kv_mul) * head_size;
+                    const ir = il + head_size;
+                    const v = s.value_cache[il..ir];
+                    const a = att[t];
+                    for (0..head_size) |i| {
+                        xb[i] += a * v[i];
+                    }
+                }
+            }
+
+            // final matmul to get the output of the attention
+            // op: `output = self.wo(output)`
+            // src: Attention.forward()
+            matmul(s.xb2, s.xb, w.wo[l * dim * dim .. (l + 1) * dim * dim], dim, dim);
+
+            // residual connection back into x
+            // op: `h = x + self.attention.forward(...)`
+            // src: TransformerBlock.forward()
+            for (0..dim) |i| {
+                x[i] += s.xb2[i];
+            }
+
+            // ffn rmsnorm
+            rmsnorm(s.xb, x, w.rms_ffn_weight[l * dim .. (l + 1) * dim]);
+
+            // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
+            matmul(s.hb, s.xb, w.w1[l * dim * hidden_dim .. (l + 1) * dim * hidden_dim], dim, hidden_dim);
+            matmul(s.hb2, s.xb, w.w3[l * dim * hidden_dim .. (l + 1) * dim * hidden_dim], dim, hidden_dim);
+
+            // SwiGLU non-linearity
+            for (0..hidden_dim) |i| {
+                var val: f32 = s.hb[i];
+                // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
+                val *= (1.0 / (1.0 + std.math.exp(-val)));
+                // elementwise multiply with w3(x)
+                val *= s.hb2[i];
+                s.hb[i] = val;
+            }
+
+            // final matmul to get the output of the ffn
+            matmul(s.xb, s.hb, w.w2[l * dim * hidden_dim .. (l + 1) * dim * hidden_dim], hidden_dim, dim);
+
+            // residual connection
+            for (0..dim) |i| {
+                x[i] += s.xb[i];
+            }
+        }
+
+        // final rmsnorm
+        rmsnorm(x, x, w.rms_final_weight[0..dim]);
+
+        // classifier into logits
+        matmul(s.logits, x, w.wcls[0 .. dim * vocab_size], dim, vocab_size);
+        return s.logits;
+    }
 };
+
+pub fn rmsnorm(o: []f32, x: []f32, weight: []f32) void {
+    assert(o.len == x.len);
+    assert(o.len == weight.len);
+
+    const size = o.len;
+    var ss: f32 = 0.0;
+    // calculate sum of sqaures
+    for (0..size) |j| {
+        ss += x[j] * x[j];
+    }
+    ss /= @as(f32, @floatFromInt(size));
+    ss += 1e-5;
+    ss = 1.0 / std.math.sqrt(ss);
+    // normalize and scale
+    for (0..size) |j| {
+        o[j] = weight[j] * (ss * x[j]);
+    }
+}
+
+pub fn softmax(x: []f32) void {
+    const size = x.len;
+    // find max value (for numerical stability)
+    var max_val = x[0];
+    for (1..size) |i| {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+    // exp and sum
+    var sum: f32 = 0.0;
+    for (0..size) |i| {
+        x[i] = std.math.exp(x[i] - max_val);
+        sum += x[i];
+    }
+    // normalize
+    for (0..size) |i| {
+        x[i] /= sum;
+    }
+}
+
+// TODO: try to implement fast matrix multiplication
+// https://gist.github.com/nadavrot/5b35d44e8ba3dd718e595e40184d03f0
+pub fn matmul(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
+    // W (d,n) @ x (n,) -> xout (d,)
+    for (0..d) |i| {
+        var val: f32 = 0.0;
+        for (0..n) |j| {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
+    }
+}
 
 pub fn readCheckpoint(checkpoint: []const u8, transformer: *Transformer) !void {
     const file = try std.fs.cwd().openFile(checkpoint, .{ .mode = .read_only });
@@ -195,7 +387,7 @@ pub fn readCheckpoint(checkpoint: []const u8, transformer: *Transformer) !void {
 
 fn buildTransformer(
     transformer: *Transformer,
-    checkpoint_path: []u8,
+    checkpoint_path: []const u8,
     allocator: Allocator,
 ) !void {
     try readCheckpoint(checkpoint_path, transformer);
@@ -216,6 +408,7 @@ fn freeTransformer(transformer: *Transformer, allocator: Allocator) void {
     transformer.state.deinit(allocator);
 }
 
+// ----------------------------------------------------------------------
 pub const TokenIndex = struct {
     str: []const u8,
     id: u32,
@@ -227,7 +420,7 @@ pub const Tokenizer = struct {
     sorted_vocab: ?[]TokenIndex = null,
     vocab_size: i32 = undefined,
     max_token_length: u32 = undefined,
-    byte_pieces: [512]u8 = undefined, // stores all single-byte strings
+    byte_pieces: [256]u8 = undefined, // stores all single-byte strings
 
     pub fn init(tokenizer_path: []const u8, vocab_size: i32, allocator: Allocator) !Tokenizer {
         var t = Tokenizer{};
@@ -240,9 +433,10 @@ pub const Tokenizer = struct {
         t.vocab = try allocator.alloc([]u8, n_vocab);
         t.vocab_scores = try allocator.alloc(f32, n_vocab);
 
+        // NOTE: every element in `byte_pieces` will be used as a slice with
+        // length 1, so that we don't need to append a null terminator to it.
         for (0..256) |i| {
-            t.byte_pieces[i * 2] = @intCast(i);
-            t.byte_pieces[i * 2 + 1] = '\x00'; // null character: '\0'
+            t.byte_pieces[i] = @intCast(i);
         }
 
         const file = try std.fs.cwd().openFile(tokenizer_path, .{ .mode = .read_only });
@@ -326,6 +520,9 @@ pub const Tokenizer = struct {
         tokens: []u32,
         allocator: Allocator,
     ) !u32 {
+        // XXX: we need to update member in Tokenizer here, that's why the first
+        // parameter of this function should be a pointer. (not sure what's the
+        // conventional way to do this)
         if (self.sorted_vocab == null) {
             // lazily initialize the vocabulary
             const n_vocab: usize = @intCast(self.vocab_size);
@@ -447,17 +644,14 @@ pub const Tokenizer = struct {
     }
 
     // XXX: if `self` is not specified as a pointer here, the returned value
-    // will be empty (might be a garbage value once input token is 0~255 and it's
-    // @constCast() from `byte_pieces` after leaving this scope?)
+    // would be gibberish.
     pub fn decode(self: *Tokenizer, prev_token: u32, token: u32) []u8 {
-        const piece = self.vocab[token];
-        var offset: usize = 0;
+        var piece: []u8 = self.vocab[token];
 
-        // TODO: check whether we can simplify code below since 0~255 would be
-        // in the form of "<0x__>", so that we can skip the parsing work once
-        // we found the first byte on `piece` is a spce.
+        // NOTE: (llama2.c) following BOS token, sentencepiece decoder strips
+        // any leading whitespace.
         if (prev_token == 1 and piece[0] == ' ') {
-            offset += 1;
+            piece = piece[1..];
         }
 
         // In llama2.c, `piece` is checked with pattern "<0x%02hhX>", and it
@@ -468,20 +662,28 @@ pub const Tokenizer = struct {
         //   - "hh": these 2-digit number are 2-byte variable
         //   - "X": interprete this 2-digit number as a hexadecimal number
         // - ">": literally matching it
-        var voc = piece[offset..]; // TODO: try to avoid this, this create a new piece of memory
-        if (voc.len == 6 and voc[0] == '<' and voc[5] == '>') {
-            const byte_val: u8 = std.fmt.parseUnsigned(u8, voc[1..5], 0) catch |err| switch (err) {
+        if (piece.len == 6 and piece[0] == '<' and piece[5] == '>') {
+            const byte_val: u8 = std.fmt.parseUnsigned(u8, piece[1..5], 0) catch |err| switch (err) {
                 else => {
-                    std.log.err("Failed to parse vocen, id: {d}\n", .{voc});
-                    return voc;
+                    std.log.err("Failed to parse token, id: {d}\n", .{token});
+                    return piece;
                 },
             };
-            voc = @constCast(self.byte_pieces[byte_val][0..]);
-            // std.debug.print("decode - byte_val: {u}\n", .{byte_val});
-            // std.debug.print("decode - voc: {s}\n", .{voc});
-        }
 
-        return voc;
+            // NOTE: type coercion explanation (`...` denotes the former item)
+            // 1. `self.byte_pieces[byte_val]`: u8
+            // 2. `&...`: *u8 (a single-item pointer to u8)
+            // 3. `@as(*[1]u8, ...)`: *[1]u8 (a pointer to a u8 array with length 1)
+            // 4. `piece = ...`: []u8 (a slice of u8)
+            //
+            // In 3., if we try to directly cast type to `[]u8`, compiler will
+            // complain "error: expected type '[]u8', found '*u8'", because
+            // compiler doesn't know the length of it.
+            // In 4., it works because slice is a fat pointer (ptr + len), and
+            // `*[1]u8` is a pointer with length info, so type coercion is valid.
+            piece = @as(*[1]u8, &self.byte_pieces[byte_val]);
+        }
+        return piece;
     }
 };
 
@@ -522,6 +724,18 @@ pub fn compareToken2(context: void, a: TokenIndex, b: TokenIndex) std.math.Order
     }
 }
 
+pub fn safePrint(piece: []const u8) void {
+    if (piece.len == 1) {
+        if (piece[0] == '\x00') return;
+        const byte_val: u8 = piece[0];
+        if (!(std.ascii.isPrint(byte_val) or std.ascii.isWhitespace(byte_val))) {
+            std.log.warn("Found non-printable input, len: {d}\n", .{piece.len});
+            return;
+        }
+    }
+    std.debug.print("{s}", .{piece});
+}
+
 pub fn buildTokenizer(
     t: *Tokenizer,
     tokenizer_path: []const u8,
@@ -535,9 +749,10 @@ pub fn freeTokenizer(tokenizer: *Tokenizer, allocator: Allocator) void {
     tokenizer.deinit(allocator);
 }
 
+// ----------------------------------------------------------------------
 pub const ProbIndex = struct {
     prob: f32,
-    index: i32,
+    index: usize,
 };
 
 pub const Sampler = struct {
@@ -568,7 +783,175 @@ pub const Sampler = struct {
     pub fn deinit(self: Sampler, allocator: Allocator) void {
         allocator.free(self.probindex);
     }
+
+    pub fn sample(self: *Sampler, logits: []f32) u32 {
+        // sample the token given the logits and some hyperparameters
+        var next: usize = 0;
+        if (self.temperature == 0.0) {
+            // greedy argmax sampling: take the token with the highest probability
+            next = sampleArgmax(logits);
+        } else {
+            // apply the temperature to the logits
+            const n_vocab: usize = @intCast(self.vocab_size);
+            for (0..n_vocab) |q| {
+                logits[q] /= self.temperature;
+            }
+            // apply softmax to the logits to get the probabilities for next token
+            softmax(logits);
+            // flip a (float) coin (this is our source of entropy for sampling)
+            const coin = randomF32(&self.rng_state);
+            // we sample from this distribution to get the next token
+            if (self.topp <= 0 or self.topp >= 1) {
+                // simply sample from the predicted probability distribution
+                next = sampleMult(logits, coin);
+            } else {
+                // top-p (nucleus) sampling, clamping the least likely tokens to zero
+                next = sampleTopp(logits, self.topp, self.probindex, coin);
+            }
+        }
+        return @as(u32, @intCast(next));
+    }
 };
+
+// TODO: should we change the output type to u32? (other sampling functions
+// below should be changed too)
+pub fn sampleArgmax(probabilities: []f32) usize {
+    // return the index that has the highest probability
+    var max_i: usize = 0;
+    var max_p: f32 = probabilities[0];
+    for (1..probabilities.len) |i| {
+        if (probabilities[i] > max_p) {
+            max_i = i;
+            max_p = probabilities[i];
+        }
+    }
+    return max_i;
+}
+
+pub fn sampleMult(probabilities: []f32, coin: f32) usize {
+    var cdf: f32 = 0.0;
+    for (0..probabilities.len) |i| {
+        cdf += probabilities[i];
+        if (coin < cdf) {
+            return i;
+        }
+    }
+    return probabilities.len - 1; // in case of rounding errors
+}
+
+// comparator for `ProbIndex`
+// NOTE: result of this comparater denotes `GreaterThan` instead of `LessThan`.
+// Maybe we should follow the convention in zig: declaring comparator as `asc()`
+// or `desc()`?
+// https://ziglang.org/documentation/0.11.0/std/#A;std:sort
+pub fn compareProb(context: void, a: ProbIndex, b: ProbIndex) bool {
+    _ = context;
+    return a.prob > b.prob;
+}
+
+pub fn sampleTopp(probabilities: []f32, topp: f32, probindex: []ProbIndex, coin: f32) usize {
+    var n0: usize = 0;
+
+    // filter out probs < (1 - topp) / (n - 1) before sorting
+    const cutoff: f32 = (1.0 - topp) / @as(f32, @floatFromInt(probabilities.len - 1));
+    for (0..probabilities.len) |i| {
+        if (probabilities[i] >= cutoff) {
+            probindex[n0].index = i;
+            probindex[n0].prob = probabilities[i];
+            n0 += 1;
+        }
+    }
+    std.sort.pdq(ProbIndex, probindex[0..n0], {}, compareProb);
+
+    // truncate the list where cumulative probability exceeds topp
+    var cumulative_prob: f32 = 0.0;
+    var last_idx = n0 - 1;
+    for (0..n0) |i| {
+        cumulative_prob += probindex[i].prob;
+        if (cumulative_prob > topp) {
+            last_idx = i;
+            break; // note that last index is included now
+        }
+    }
+
+    // sample from the truncated list
+    const r = coin * cumulative_prob;
+    var cdf: f32 = 0.0;
+    for (0..(last_idx + 1)) |i| {
+        cdf += probindex[i].prob;
+        if (r < cdf) {
+            return probindex[i].index;
+        }
+    }
+    return probindex[last_idx].index;
+}
+
+pub fn randomU32(state: *u64) u32 {
+    state.* ^= state.* >> 12;
+    state.* ^= state.* << 25;
+    state.* ^= state.* >> 27;
+    return @as(u32, @intCast((state.* *% @as(u64, 0x2545F4914F6CDD1D)) >> 32));
+}
+
+pub fn randomF32(state: *u64) f32 {
+    // 16777216 = 2^24 = "0 10010111 00000000000000000000000"
+    // sign: 0, exponent: 10010111 (-127 + 151 = 24), mantissa: 0
+    const magic: f32 = 16777216.0;
+    return @as(f32, @floatFromInt(randomU32(state) >> 8)) / magic;
+}
+
+// ----------------------------------------------------------------------
+pub fn generate(
+    transformer: *Transformer,
+    tokenizer: *Tokenizer,
+    sampler: *Sampler,
+    prompt: []const u8,
+    steps: u32,
+    allocator: Allocator,
+) !void {
+    var prompt_tokens: []u32 = try allocator.alloc(u32, prompt.len + 3);
+    defer allocator.free(prompt_tokens);
+
+    const n_tokens = try tokenizer.encode(prompt, true, false, prompt_tokens, allocator);
+
+    var start: i64 = 0;
+    var next: u32 = undefined;
+    var token = prompt_tokens[0];
+    var pos: u32 = 0;
+
+    while (pos < steps) {
+        // forward the transformer to get logits for the next token
+        var logits: []f32 = transformer.forward(token, pos);
+
+        if (pos < n_tokens - 1) {
+            next = prompt_tokens[pos + 1];
+        } else {
+            next = sampler.sample(logits);
+        }
+        pos += 1;
+
+        // data-dependent terminating condition: the BOS (=1) token delimits sequences
+        if (next == 1) {
+            break;
+        }
+
+        const piece = tokenizer.decode(token, next);
+        safePrint(piece);
+        token = next;
+
+        // init the timer here because the first iteration can be slower
+        if (start == 0) {
+            start = std.time.milliTimestamp();
+        }
+    }
+    std.debug.print("\n", .{});
+
+    if (pos > 1) {
+        const end: i64 = std.time.milliTimestamp();
+        const tok_per_sec: f32 = @as(f32, @floatFromInt(pos - 1)) / @as(f32, @floatFromInt((end - start))) * 1000;
+        std.debug.print("achieved tok/s: {d}\n", .{tok_per_sec});
+    }
+}
 
 fn errorUsage() void {
     const msg =
@@ -670,4 +1053,6 @@ pub fn main() !void {
     // Build sampler
     var sampler = try Sampler.init(32000, temperature, topp, rng_seed, allocator);
     defer sampler.deinit(allocator);
+
+    try generate(&transformer, &tokenizer, &sampler, prompt, steps, allocator);
 }
