@@ -1,12 +1,23 @@
 const std = @import("std");
+const ztracy = @import("third_party/zig-gamedev/libs/ztracy/build.zig");
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
     const exe = b.addExecutable(.{
         .name = "run",
         .root_source_file = .{ .path = "run.zig" },
+        .target = target,
+        .optimize = optimize,
     });
 
     b.installArtifact(exe);
+
+    // ztracy
+    const ztracy_pkg = ztracy.package(b, target, optimize, .{
+        .options = .{ .enable_ztracy = true },
+    });
+    ztracy_pkg.link(exe);
 
     const run_exe = b.addRunArtifact(exe);
     const run_step = b.step("run", "Run the application");
