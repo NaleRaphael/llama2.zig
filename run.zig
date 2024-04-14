@@ -348,9 +348,11 @@ pub fn matmul(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
     }
 }
 
+/// Read checkpoint and initialize transformer. Note that user is responsible to
+/// call `freeTransformer()` to delete the memory mapping.
 pub fn readCheckpoint(checkpoint: []const u8, transformer: *Transformer) !void {
     const file = try std.fs.cwd().openFile(checkpoint, .{ .mode = .read_only });
-    // NOTE: we can close file after `mmap()` is done
+    // NOTE: we can close file after `mmap()` call has returned
     defer file.close();
 
     var config: *Config = &transformer.config;
@@ -364,7 +366,6 @@ pub fn readCheckpoint(checkpoint: []const u8, transformer: *Transformer) !void {
     // Reposition to the head of file. Offset of `Config` will be handled later.
     try file.seekTo(0);
 
-    // NOTE: we would delete this memory map later outside this scope.
     const data = try std.os.mmap(
         null,
         transformer.file_size,
@@ -402,7 +403,7 @@ fn freeTransformer(transformer: *Transformer, allocator: Allocator) void {
         @alignCast(@ptrCast(transformer.data)),
     )[0..transformer.file_size];
 
-    // Delete memory map
+    // Delete memory mapping
     std.os.munmap(mmap_data);
 
     transformer.state.deinit(allocator);
@@ -412,6 +413,11 @@ fn freeTransformer(transformer: *Transformer, allocator: Allocator) void {
 pub const TokenIndex = struct {
     str: []const u8,
     id: u32,
+
+    /// Comparator. True: a < b.
+    pub fn desc(_: void, a: TokenIndex, b: TokenIndex) bool {
+        return strcmp(a.str, b.str) < 0;
+    }
 };
 
 pub const Tokenizer = struct {
@@ -505,7 +511,7 @@ pub const Tokenizer = struct {
     pub fn strLookup(self: Tokenizer, str: []const u8) ?u32 {
         const tok = TokenIndex{ .str = str, .id = undefined };
         // NOTE: `bsearch` in C returns a pointer, this returns an index.
-        const res = std.sort.binarySearch(TokenIndex, tok, self.sorted_vocab.?, {}, compareToken2);
+        const res = std.sort.binarySearch(TokenIndex, tok, self.sorted_vocab.?, {}, compareToken);
 
         const idx = res orelse return null;
         const tok_id = self.sorted_vocab.?[idx].id;
@@ -535,7 +541,7 @@ pub const Tokenizer = struct {
             }
 
             // sort vocab
-            std.sort.pdq(TokenIndex, self.sorted_vocab.?, {}, compareToken);
+            std.sort.pdq(TokenIndex, self.sorted_vocab.?, {}, TokenIndex.desc);
         }
 
         // (llama2.c) Temporary buffer to store merge candidates of always two
@@ -687,9 +693,9 @@ pub const Tokenizer = struct {
     }
 };
 
-// Compare strings like how `strcmp` works in C. Note that this implementation
-// does not rely on null terminator, but it relies on how `slice` works in zig
-// as it provides length infomation of a sequence.
+/// Compare strings like how `strcmp` works in C. Note that this implementation
+/// does not rely on null terminator, but it relies on how `slice` works in zig
+/// as it provides length infomation of a sequence.
 pub fn strcmp(a: []const u8, b: []const u8) i32 {
     var i: usize = 0;
     while (i < a.len and i < b.len) {
@@ -705,14 +711,8 @@ pub fn strcmp(a: []const u8, b: []const u8) i32 {
     return len_a - len_b;
 }
 
-// Compare 2 `TokenIndex`s. True: a < b; False: a >= b.
-pub fn compareToken(context: void, a: TokenIndex, b: TokenIndex) bool {
-    _ = context;
-    return strcmp(a.str, b.str) < 0;
-}
-
-// Compare 2 `TokenIndex`s and return `math.Order`.
-pub fn compareToken2(context: void, a: TokenIndex, b: TokenIndex) std.math.Order {
+/// Compare 2 `TokenIndex`s and return `math.Order`.
+pub fn compareToken(context: void, a: TokenIndex, b: TokenIndex) std.math.Order {
     _ = context;
     const res = strcmp(a.str, b.str);
     if (res < 0) {
@@ -753,6 +753,11 @@ pub fn freeTokenizer(tokenizer: *Tokenizer, allocator: Allocator) void {
 pub const ProbIndex = struct {
     prob: f32,
     index: usize,
+
+    /// Comparator. True: a > b.
+    pub fn asc(_: void, a: ProbIndex, b: ProbIndex) bool {
+        return a.prob > b.prob;
+    }
 };
 
 pub const Sampler = struct {
@@ -861,7 +866,7 @@ pub fn sampleTopp(probabilities: []f32, topp: f32, probindex: []ProbIndex, coin:
             n0 += 1;
         }
     }
-    std.sort.pdq(ProbIndex, probindex[0..n0], {}, compareProb);
+    std.sort.pdq(ProbIndex, probindex[0..n0], {}, ProbIndex.asc);
 
     // truncate the list where cumulative probability exceeds topp
     var cumulative_prob: f32 = 0.0;
