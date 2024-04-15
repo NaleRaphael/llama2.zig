@@ -2,6 +2,40 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
+// XXX: Because of the limitation of build system in zig v0.11, we cannot
+// switch between `tracy_full` and `tracy_stub` by passing compilation flags.
+// So we have to do this kind of "conditional import". See also section
+// "conditional compilation" in "docs/ISSUES.md".
+const use_tracy = @import("build_options").use_tracy;
+const ztracy = if (use_tracy) @import("ztracy");
+
+const tracy_wrapper_stub = struct {
+    pub inline fn startZone(
+        _: std.builtin.SourceLocation,
+        _: [*:0]const u8,
+        _: u64,
+    ) void {}
+
+    pub inline fn endZone(_: *const anyopaque) void {}
+};
+
+const tracy_wrapper_full = struct {
+    pub inline fn startZone(
+        src_loc: std.builtin.SourceLocation,
+        name: [*:0]const u8,
+        color: u64,
+    ) ztracy.ZoneCtx {
+        const zone = if (use_tracy) ztracy.ZoneNC(src_loc, name, color);
+        return zone;
+    }
+
+    pub inline fn endZone(zone: *const anyopaque) void {
+        if (use_tracy) @as(*ztracy.ZoneCtx, @constCast(@alignCast(@ptrCast(zone)))).End();
+    }
+};
+
+const TracyWrapper = if (use_tracy) tracy_wrapper_full else tracy_wrapper_stub;
+
 // Helper function for development
 fn printStruct(s: anytype) void {
     inline for (std.meta.fields(@TypeOf(s))) |f| {

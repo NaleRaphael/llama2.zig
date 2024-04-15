@@ -1,9 +1,10 @@
 # llama2.zig
-It's Just a work to reimplement [llama2.c][1] in zig, also a toy project for me
-to explore zig.
+This's just a work to reimplement [llama2.c][1] in Zig, also a toy project for
+me to explore Zig.
 
-BTW, there is already a stable zig implementation [cgbur/llama2.zig][2], feel
-free to check it out!
+If you are looking for a stable & fast implementation, please consider checking
+out [cgbur/llama2.zig][2]!
+
 
 ## Development
 - To run tests, it currently requires installing `PyTorch` to load checkpoint

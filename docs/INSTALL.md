@@ -31,7 +31,7 @@
     $ cd tracy
     $ mkdir third_party && cd third_party
     $ git clone https://github.com/libcapstone/libcapstone
-    # (9a486f5 is the latest commit for me at this time, you can pick a stable tag)
+    # (9a486f5 is the latest commit for me at this moment, you can pick a stable tag)
     $ cd libcapstone && git checkout 9a486f5
 
     # 2. Build libcapstone and install artifacts to `build/dist`
@@ -59,6 +59,7 @@
 
     # 6. Note that we need to set LD_LIBRARY_PATH while running the executable
     # since shared libraries of `libcapstone` are not installed in default paths.
+    $ DIR_LIBCAPSTONE_DIST=`realpath ../../../third_party/libcapstone/build/dist`
     $ LD_LIBRARY_PATH="${DIR_LIBCAPSTONE_DIST}/lib" ./Tracy-release
     ```
 
