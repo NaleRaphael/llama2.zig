@@ -2,6 +2,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
+// TODO: the suggested vector size 16 would make matmul slower then using 8.
+// We need to figure out whether we should optimize for size 16.
+// const VEC_SIZE_F32 = std.simd.suggestVectorSize(f32) orelse 4;
+const VEC_SIZE_F32 = 4;
+
 // XXX: Because of the limitation of build system in zig v0.11, we cannot
 // switch between `tracy_full` and `tracy_stub` by passing compilation flags.
 // So we have to do this kind of "conditional import". See also section
@@ -369,15 +374,52 @@ pub fn softmax(x: []f32) void {
     }
 }
 
-// TODO: try to implement fast matrix multiplication
-// https://gist.github.com/nadavrot/5b35d44e8ba3dd718e595e40184d03f0
+/// Matrix multiplication: W (d,n) @ x (n,) -> xout (d,)
 pub fn matmul(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
-    // W (d,n) @ x (n,) -> xout (d,)
+    const zone = TracyWrapper.startZone(@src(), "matmul", 0x00_00_ff_00);
+    defer TracyWrapper.endZone(&zone);
+
+    // matmul_naive(xout, x, w, n, d);
+    matmul_simd(xout, x, w, n, d);
+}
+
+fn matmul_naive(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
     for (0..d) |i| {
         var val: f32 = 0.0;
         for (0..n) |j| {
             val += w[i * n + j] * x[j];
         }
+        xout[i] = val;
+    }
+}
+
+fn matmul_simd(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
+    const vec_sz = VEC_SIZE_F32;
+    const n_vec: usize = n / vec_sz;
+    const n_rem: usize = n % vec_sz;
+
+    for (0..d) |i| {
+        var val: f32 = 0.0;
+        const offset: usize = i * n;
+
+        for (0..n_vec) |nv| {
+            // NOTE: SIMD vector requires a known size at compile time, so we
+            // need to access slice like this.
+            const vx: @Vector(vec_sz, f32) = x[nv * vec_sz ..][0..vec_sz].*;
+            const vw: @Vector(vec_sz, f32) = w[offset + nv * vec_sz ..][0..vec_sz].*;
+            val += @reduce(.Add, vx * vw);
+        }
+
+        // Process remaining elements
+        var vx: @Vector(vec_sz, f32) = @splat(@as(f32, 0.0));
+        var vw: @Vector(vec_sz, f32) = @splat(@as(f32, 0.0));
+        const offset2: usize = vec_sz * n_vec;
+        for (0..n_rem) |j| {
+            vx[j] = x[offset + offset2 + j];
+            vw[j] = w[offset2 + j];
+        }
+        val += @reduce(.Add, vx * vw);
+
         xout[i] = val;
     }
 }
