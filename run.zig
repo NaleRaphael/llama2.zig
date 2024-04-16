@@ -422,7 +422,12 @@ fn matmul_simd(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
 
 /// Read checkpoint and initialize transformer. Note that user is responsible to
 /// call `freeTransformer()` to delete the memory mapping.
-pub fn readCheckpoint(checkpoint: []const u8, transformer: *Transformer) !void {
+pub fn readCheckpoint(
+    checkpoint: []const u8,
+    transformer: *Transformer,
+    use_mmap: bool,
+    allocator: Allocator,
+) !void {
     const file = try std.fs.cwd().openFile(checkpoint, .{ .mode = .read_only });
     // NOTE: we can close file after `mmap()` call has returned
     defer file.close();
@@ -438,15 +443,28 @@ pub fn readCheckpoint(checkpoint: []const u8, transformer: *Transformer) !void {
     // Reposition to the head of file. Offset of `Config` will be handled later.
     try file.seekTo(0);
 
-    const data = try std.os.mmap(
-        null,
-        transformer.file_size,
-        std.os.PROT.READ,
-        std.os.MAP.PRIVATE,
-        file.handle,
-        0,
-    );
-    transformer.data = @ptrCast(data);
+    var data: []align(std.mem.page_size) u8 = undefined;
+    if (use_mmap) {
+        data = try std.os.mmap(
+            null,
+            transformer.file_size,
+            std.os.PROT.READ,
+            std.os.MAP.PRIVATE,
+            file.handle,
+            0,
+        );
+        transformer.data = @ptrCast(data);
+    } else {
+        data = blk: {
+            const buffer = try allocator.alignedAlloc(u8, std.mem.page_size, transformer.file_size);
+            const read_len = try file.readAll(buffer);
+            if (read_len != transformer.file_size) {
+                std.debug.print("error: failed to read checkpoint file\n", .{});
+                return std.os.ReadError.OperationAborted;
+            }
+            break :blk buffer;
+        };
+    }
 
     // View `data` as `void*` from C perspective (`*anyopaque` in zig)
     var weights_ptr: *anyopaque = @ptrCast(data);
@@ -461,22 +479,27 @@ pub fn readCheckpoint(checkpoint: []const u8, transformer: *Transformer) !void {
 fn buildTransformer(
     transformer: *Transformer,
     checkpoint_path: []const u8,
+    use_mmap: bool,
     allocator: Allocator,
 ) !void {
-    try readCheckpoint(checkpoint_path, transformer);
+    try readCheckpoint(checkpoint_path, transformer, use_mmap, allocator);
     transformer.state = try RunState.init(&transformer.config, allocator);
 }
 
-fn freeTransformer(transformer: *Transformer, allocator: Allocator) void {
+fn freeTransformer(transformer: *Transformer, use_mmap: bool, allocator: Allocator) void {
     // Cast pointer of mmap data from `*anyopaque` to the original output type
     // `[]align(std.mem.page_size) u8`.
-    var mmap_data = @as(
+    const data = @as(
         [*]align(std.mem.page_size) u8,
         @alignCast(@ptrCast(transformer.data)),
     )[0..transformer.file_size];
 
-    // Delete memory mapping
-    std.os.munmap(mmap_data);
+    if (use_mmap) {
+        // Delete memory mapping
+        std.os.munmap(data);
+    } else {
+        allocator.free(data);
+    }
 
     transformer.state.deinit(allocator);
 }
@@ -1043,6 +1066,7 @@ fn errorUsage() void {
         \\   -z <string> optional path to custom tokenizer
         \\   -m <string> mode: generate|chat, default: generate
         \\   -y <string> (optional) system prompt in chat mode
+        \\   -l <int>   (optional) use mmap for checkpoint (0: disable, 1: enable)
     ;
     std.debug.print("{s}\n", .{msg});
     std.process.exit(1);
@@ -1070,6 +1094,7 @@ pub fn main() !void {
     var rng_seed: u64 = 0;
     var mode: []const u8 = "generate";
     var system_prompt: []const u8 = "";
+    var use_mmap: bool = true;
 
     var i: usize = 2;
     while (i < args.len) : (i += 2) {
@@ -1099,6 +1124,9 @@ pub fn main() !void {
             mode = val;
         } else if (arg[1] == 'y') {
             system_prompt = val;
+        } else if (arg[1] == 'l') {
+            const tmp = try std.fmt.parseInt(u1, val, 0);
+            use_mmap = if (tmp == 1) true else false;
         } else {
             errorUsage();
         }
@@ -1119,8 +1147,8 @@ pub fn main() !void {
     }
 
     var transformer = Transformer{};
-    try buildTransformer(&transformer, checkpoint_path, allocator);
-    defer freeTransformer(&transformer, allocator);
+    try buildTransformer(&transformer, checkpoint_path, use_mmap, allocator);
+    defer freeTransformer(&transformer, use_mmap, allocator);
 
     // Build tokenizer
     var tokenizer = Tokenizer{};
