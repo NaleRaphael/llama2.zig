@@ -401,14 +401,16 @@ fn matmul_simd(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
     for (0..d) |i| {
         var val: f32 = 0.0;
         const offset: usize = i * n;
+        var vsum: @Vector(vec_sz, f32) = @splat(0.0);
 
         for (0..n_vec) |nv| {
             // NOTE: SIMD vector requires a known size at compile time, so we
             // need to access slice like this.
             const vx: @Vector(vec_sz, f32) = x[nv * vec_sz ..][0..vec_sz].*;
             const vw: @Vector(vec_sz, f32) = w[offset + nv * vec_sz ..][0..vec_sz].*;
-            val += @reduce(.Add, vx * vw);
+            vsum += vx * vw;
         }
+        val = @reduce(.Add, vsum);
 
         // Process remaining elements
         const offset2: usize = vec_sz * n_vec;
