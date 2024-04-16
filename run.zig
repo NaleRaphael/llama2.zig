@@ -941,16 +941,6 @@ pub fn sampleMult(probabilities: []f32, coin: f32) usize {
     return probabilities.len - 1; // in case of rounding errors
 }
 
-// comparator for `ProbIndex`
-// NOTE: result of this comparater denotes `GreaterThan` instead of `LessThan`.
-// Maybe we should follow the convention in zig: declaring comparator as `asc()`
-// or `desc()`?
-// https://ziglang.org/documentation/0.11.0/std/#A;std:sort
-pub fn compareProb(context: void, a: ProbIndex, b: ProbIndex) bool {
-    _ = context;
-    return a.prob > b.prob;
-}
-
 pub fn sampleTopp(probabilities: []f32, topp: f32, probindex: []ProbIndex, coin: f32) usize {
     var n0: usize = 0;
 
