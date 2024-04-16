@@ -5,3 +5,6 @@ zig-out/
 /build/
 /build-*/
 /docgen_tmp/
+
+models/
+third_party/

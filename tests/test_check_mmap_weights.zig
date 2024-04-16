@@ -26,7 +26,7 @@ test "check mmap weights" {
     const argv = [_][]const u8{
         "python",
         "tests/get_weights_for_check.py",
-        "llama2.c/stories15M.pt",
+        "models/stories15M.pt",
         "--fn_output",
         fn_output,
     };
@@ -49,10 +49,10 @@ test "check mmap weights" {
 
     var ws: WeightSamples = try f_samples.reader().readStruct(WeightSamples);
 
-    const checkpoint_path: []const u8 = "llama2.c/stories15M.bin";
+    const checkpoint_path: []const u8 = "models/stories15M.bin";
     var transformer = mod.Transformer{};
 
-    try mod.readCheckpoint(checkpoint_path, &transformer);
+    try mod.readCheckpoint(checkpoint_path, &transformer, true, allocator);
 
     const tw = transformer.weights;
     try utils.assertArrayEqual(f32, tw.token_embedding_table[0..4], ws.token_embedding_table[0..4]);

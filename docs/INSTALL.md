@@ -1,7 +1,7 @@
 ## Tools for development
 ### [tracy][gh_tracy]
 - [ztracy][gh_ztracy]: Zig bindings for tracy client.
-    - Run `scripts/setup_dev_deps.sh` to clone it.
+    - Fetch the submodule and build with flag `-Duse_tracy=true`.
 - Bulid `tracy` server (it's recommended to checkout section "2.3 Building the
     server" in [tracy manuals][pdf_tracy_manuals]):
     ```bash
