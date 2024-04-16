@@ -13,6 +13,10 @@ out [cgbur/llama2.zig][2] and [clebert/llama2.zig][3]!
 
 ## Build
 ```bash
+# XXX: Currently the build have to look up `ztracy` even if it's dependency for
+# development only, so you have to fetch the submodule once.
+# $ git submodule update --init --recursive
+
 $ zig build -Doptimize=ReleaseFast
 ```
 
