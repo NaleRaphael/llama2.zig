@@ -411,14 +411,10 @@ fn matmul_simd(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
         }
 
         // Process remaining elements
-        var vx: @Vector(vec_sz, f32) = @splat(@as(f32, 0.0));
-        var vw: @Vector(vec_sz, f32) = @splat(@as(f32, 0.0));
         const offset2: usize = vec_sz * n_vec;
         for (0..n_rem) |j| {
-            vx[j] = x[offset + offset2 + j];
-            vw[j] = w[offset2 + j];
+            val += w[offset + offset2 + j] * x[offset2 + j];
         }
-        val += @reduce(.Add, vx * vw);
 
         xout[i] = val;
     }
