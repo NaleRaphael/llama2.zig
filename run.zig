@@ -2,10 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-// TODO: the suggested vector size 16 would make matmul slower then using 8.
-// We need to figure out whether we should optimize for size 16.
-// const VEC_SIZE_F32 = std.simd.suggestVectorSize(f32) orelse 4;
-const VEC_SIZE_F32 = 4;
+const VEC_SIZE_F32 = std.simd.suggestVectorSize(f32) orelse 4;
 
 // XXX: Because of the limitation of build system in zig v0.11, we cannot
 // switch between `tracy_full` and `tracy_stub` by passing compilation flags.
