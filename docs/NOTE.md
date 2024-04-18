@@ -1,8 +1,13 @@
 ## TODOs
-- Support int8 & q80 inference?
-- Use `@Vector` for SIMD
+- [] Support int8 & q80 inference?
+- [x] Use `@Vector` (SIMD) to improve performance
+- [] Parallelize some loops/ops? e.g., Q, K, V projection
+    - Tried implementing matmul with SIMD + accessing data in Morton pattern,
+    but the improvement is not obvious in this codebase.
+    (https://gist.github.com/NaleRaphael/ff0db8b724d5f10e96259aab6484ca21)
+- [] RoPE scaling
 
-
+## Implementation related
 ### Header
 - Header in hex (using command `$ xxd -l 32 stories15M.bin`)
     ```hex
@@ -48,16 +53,20 @@ with open(tokenizer_bin, 'wb') as f:
 00000000: 1b00 0000 0000 0000 0500 0000 3c75 6e6b  ............<unk
 00000010: 3e00 0000 0005 0000 000a 3c73 3e0a 0000  >.........<s>...
 
-# 1b00 0000: max_token_length (i32) = 0x0000001b = 27
+# 1b00 0000: max_token_length (i32) = 0x0000_001b = 27
 # 0000 0000: "score of tokens[0]" (f32) = 0.0
-# 0500 0000: "length of tokens[0]" (i32) = 0x00000005 = 5
-# 3c75 6e6b 3e00: "tokens[0]" (byte) = [3c, 75, 6e, 6b, 3e]
+# 0500 0000: "length of tokens[0]" (i32) = 0x0000_0005 = 5
+# 3c75 6e6b 3e(00): "tokens[0]" (byte) = [3c, 75, 6e, 6b, 3e]
 #            = ['<', 'u', 'n', 'k', '>']
+# (3e)00 0000 00(05): "score of tokens[1]" = 0.0
+# (00)05 0000 00(0a): "length of tokens[1]" = 0x0000_0005 = 5
+# 000a 3c73 3e0a: "tokens[1]" (byte) = [0a, 3c, 73, 3e, 0a]
+#            = ['/n', '<', 's', '>', '/n']
 
 Note that we would only read "length of tokens[n]" bytes for "tokens[n]"
 ```
 
-### C vs zig
+## C vs zig
 - `fread` vs `read`?
 ```c
 // To read an int (i32)
@@ -76,7 +85,7 @@ var value: i32 = std.mem.readIntSliceLittle(u32, &buf_x32);
 - `null-terminated string` vs `slice (pointer + length)`?
     > ref: https://news.ycombinator.com/item?id=33231837
 
-### Test
+## Test
 - To verify the implementation of bytes-to-UTF8, we can try setting prompt with
     non-ASCII strings, e.g.,
     ```bash

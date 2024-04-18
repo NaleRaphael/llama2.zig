@@ -1139,6 +1139,15 @@ pub fn main() !void {
     try buildTransformer(&transformer, checkpoint_path, use_mmap, allocator);
     defer freeTransformer(&transformer, use_mmap, allocator);
 
+    if (steps == 0) {
+        steps = @intCast(transformer.cofnig.seq_len);
+    } else if (steps > transformer.config.seq_len) {
+        // XXX: Currently we will clip `steps` if it exceeds the maximal
+        // sequence length (see also llama2.c issue#348). But maybe we can
+        // apply RoPE scaling to make it able to inference with longer context?
+        steps = @intCast(transformer.cofnig.seq_len);
+    }
+
     // Build tokenizer
     var tokenizer = Tokenizer{};
     try buildTokenizer(&tokenizer, tokenizer_path, 32000, allocator);
