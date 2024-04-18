@@ -452,7 +452,6 @@ pub fn readCheckpoint(
             file.handle,
             0,
         );
-        transformer.data = @ptrCast(data);
     } else {
         data = blk: {
             const buffer = try allocator.alignedAlloc(u8, std.mem.page_size, transformer.file_size);
@@ -464,6 +463,7 @@ pub fn readCheckpoint(
             break :blk buffer;
         };
     }
+    transformer.data = @ptrCast(data);
 
     // View `data` as `void*` from C perspective (`*anyopaque` in zig)
     var weights_ptr: *anyopaque = @ptrCast(data);
