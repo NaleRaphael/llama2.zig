@@ -1140,12 +1140,13 @@ pub fn main() !void {
     defer freeTransformer(&transformer, use_mmap, allocator);
 
     if (steps == 0) {
-        steps = @intCast(transformer.cofnig.seq_len);
+        steps = @intCast(transformer.config.seq_len);
     } else if (steps > transformer.config.seq_len) {
         // XXX: Currently we will clip `steps` if it exceeds the maximal
         // sequence length (see also llama2.c issue#348). But maybe we can
         // apply RoPE scaling to make it able to inference with longer context?
-        steps = @intCast(transformer.cofnig.seq_len);
+        std.debug.print("warning: clipping `steps` because it exceeds `max_seq_len`\n", .{});
+        steps = @intCast(transformer.config.seq_len);
     }
 
     // Build tokenizer

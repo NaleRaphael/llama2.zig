@@ -1,11 +1,11 @@
 ## TODOs
-- [] Support int8 & q80 inference?
+- [ ] Support int8 & q80 inference?
 - [x] Use `@Vector` (SIMD) to improve performance
-- [] Parallelize some loops/ops? e.g., Q, K, V projection
+- [ ] Parallelize some loops/ops? e.g., Q, K, V projection
     - Tried implementing matmul with SIMD + accessing data in Morton pattern,
     but the improvement is not obvious in this codebase.
     (https://gist.github.com/NaleRaphael/ff0db8b724d5f10e96259aab6484ca21)
-- [] RoPE scaling
+- [ ] RoPE scaling
 
 ## Implementation related
 ### Header
