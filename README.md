@@ -42,7 +42,7 @@ checking whether weights are correctly mapped.
 # Remember to download the model `stories15M.pt` (PyTorch model) first:
 # wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt -P models
 
-$ zig test test.zig
+$ zig test tests.zig
 ```
 
 ## Developments
