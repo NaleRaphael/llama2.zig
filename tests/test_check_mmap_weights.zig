@@ -32,7 +32,7 @@ test "check mmap weights" {
     };
 
     // TODO: figure out how to make this work when `cwd` is specified
-    const proc = try std.ChildProcess.exec(.{
+    const proc = try std.ChildProcess.run(.{
         .allocator = allocator,
         .argv = &argv,
     });

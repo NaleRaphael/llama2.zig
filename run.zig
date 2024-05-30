@@ -2,48 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const VEC_SIZE_F32 = std.simd.suggestVectorSize(f32) orelse 4;
-
-// XXX: Because of the limitation of build system in zig v0.11, we cannot
-// switch between `tracy_full` and `tracy_stub` by passing compilation flags.
-// So we have to do this kind of "conditional import". See also section
-// "conditional compilation" in "docs/ISSUES.md".
-const use_tracy = @import("build_options").use_tracy;
-const ztracy = if (use_tracy) @import("ztracy");
-
-const tracy_wrapper_stub = struct {
-    pub inline fn startZone(
-        _: std.builtin.SourceLocation,
-        _: [*:0]const u8,
-        _: u64,
-    ) void {}
-
-    pub inline fn endZone(_: *const anyopaque) void {}
-};
-
-const tracy_wrapper_full = struct {
-    pub inline fn startZone(
-        src_loc: std.builtin.SourceLocation,
-        name: [*:0]const u8,
-        color: u64,
-    ) ztracy.ZoneCtx {
-        const zone = if (use_tracy) ztracy.ZoneNC(src_loc, name, color);
-        return zone;
-    }
-
-    pub inline fn endZone(zone: *const anyopaque) void {
-        if (use_tracy) @as(*ztracy.ZoneCtx, @constCast(@alignCast(@ptrCast(zone)))).End();
-    }
-};
-
-const TracyWrapper = if (use_tracy) tracy_wrapper_full else tracy_wrapper_stub;
-
-// Helper function for development
-fn printStruct(s: anytype) void {
-    inline for (std.meta.fields(@TypeOf(s))) |f| {
-        std.debug.print(f.name ++ ": {any}\n", .{@as(f.type, @field(s, f.name))});
-    }
-}
+const VEC_SIZE_F32 = std.simd.suggestVectorLength(f32) orelse 4;
 
 // For model exported by `legacy_export()` (v0)
 // NOTE: We should use `extern struct` as it supports guaranteed layout.
@@ -373,21 +332,7 @@ pub fn softmax(x: []f32) void {
 
 /// Matrix multiplication: W (d,n) @ x (n,) -> xout (d,)
 pub fn matmul(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
-    const zone = TracyWrapper.startZone(@src(), "matmul", 0x00_00_ff_00);
-    defer TracyWrapper.endZone(&zone);
-
-    // matmul_naive(xout, x, w, n, d);
     matmul_simd(xout, x, w, n, d);
-}
-
-fn matmul_naive(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
-    for (0..d) |i| {
-        var val: f32 = 0.0;
-        for (0..n) |j| {
-            val += w[i * n + j] * x[j];
-        }
-        xout[i] = val;
-    }
 }
 
 fn matmul_simd(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
@@ -436,7 +381,7 @@ pub fn readCheckpoint(
 
     // XXX: (llama2.c) negative vocab size -> unshared weights
     const shared_weights: bool = config.vocab_size > 0;
-    config.vocab_size = try std.math.absInt(config.vocab_size);
+    config.vocab_size = @intCast(@abs(config.vocab_size));
     transformer.file_size = (try file.stat()).size;
 
     // Reposition to the head of file. Offset of `Config` will be handled later.
@@ -444,11 +389,11 @@ pub fn readCheckpoint(
 
     var data: []align(std.mem.page_size) u8 = undefined;
     if (use_mmap) {
-        data = try std.os.mmap(
+        data = try std.posix.mmap(
             null,
             transformer.file_size,
-            std.os.PROT.READ,
-            std.os.MAP.PRIVATE,
+            std.os.linux.PROT.READ,
+            .{ .TYPE = .PRIVATE },
             file.handle,
             0,
         );
@@ -458,7 +403,7 @@ pub fn readCheckpoint(
             const read_len = try file.readAll(buffer);
             if (read_len != transformer.file_size) {
                 std.debug.print("error: failed to read checkpoint file\n", .{});
-                return std.os.ReadError.OperationAborted;
+                return std.fs.File.ReadError.OperationAborted;
             }
             break :blk buffer;
         };
@@ -495,7 +440,7 @@ fn freeTransformer(transformer: *Transformer, use_mmap: bool, allocator: Allocat
 
     if (use_mmap) {
         // Delete memory mapping
-        std.os.munmap(data);
+        std.posix.munmap(data);
     } else {
         allocator.free(data);
     }
@@ -550,7 +495,7 @@ pub const Tokenizer = struct {
             std.debug.print("failed read\n", .{});
             return std.fs.File.ReadError.Unexpected;
         }
-        t.max_token_length = std.mem.readIntSliceLittle(u32, &buf_x32);
+        t.max_token_length = std.mem.readInt(u32, &buf_x32, .little);
 
         // read tokens, lengths of tokens, and scores
         var len: i32 = undefined;
@@ -711,7 +656,7 @@ pub const Tokenizer = struct {
                 const token1 = self.vocab[tokens[i]];
                 const token2 = self.vocab[tokens[i + 1]];
                 _ = try std.fmt.bufPrint(str_buffer, "{s}{s}", .{ token1, token2 });
-                var len = token1.len + token2.len;
+                const len = token1.len + token2.len;
 
                 const lookup_result = self.strLookup(str_buffer[0..len]);
                 if (lookup_result != null and self.vocab_scores[lookup_result.?] > best_score) {
@@ -998,7 +943,7 @@ pub fn generate(
     steps: u32,
     allocator: Allocator,
 ) !void {
-    var prompt_tokens: []u32 = try allocator.alloc(u32, prompt.len + 3);
+    const prompt_tokens: []u32 = try allocator.alloc(u32, prompt.len + 3);
     defer allocator.free(prompt_tokens);
 
     const n_tokens = try tokenizer.encode(prompt, true, false, prompt_tokens, allocator);
@@ -1010,7 +955,7 @@ pub fn generate(
 
     while (pos < steps) {
         // forward the transformer to get logits for the next token
-        var logits: []f32 = transformer.forward(token, pos);
+        const logits: []f32 = transformer.forward(token, pos);
 
         if (pos < n_tokens - 1) {
             next = prompt_tokens[pos + 1];

@@ -19,7 +19,7 @@ pub fn parseArray(
     var found: bool = false;
 
     // find where to start & stop iterating, and also check whether format is valid
-    var istart: usize = blk: {
+    const istart: usize = blk: {
         for (text.*, 0..) |c, i| {
             if (c == '[') {
                 break :blk i + 1;
@@ -28,7 +28,7 @@ pub fn parseArray(
         break :blk text.len;
     };
 
-    var iend: usize = blk: {
+    const iend: usize = blk: {
         for (text.*[istart..], istart..) |c, i| {
             if (c == ']') {
                 break :blk i + 1;
