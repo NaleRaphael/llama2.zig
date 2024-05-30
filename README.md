@@ -9,7 +9,7 @@ If you are looking for a stable & fast implementations, please consider checking
 out [cgbur/llama2.zig][2] and [clebert/llama2.zig][3]!
 
 ## Requirements
-- zig: 0.11.0
+- zig: 0.12.0
 
 ## Build
 ```bash
@@ -45,7 +45,11 @@ checking whether weights are correctly mapped.
 $ zig test tests.zig
 ```
 
-## Developments
+## Profiling
+> [!NOTE]  
+> Currently `ztracy` supports only zig up to 0.11.0. If you want to try it,
+> please checkout to branch `dev/zig-0.11.0`.
+
 If you want to profile the code, please fetch the submodules:
 ```bash
 $ git submodule update --init --recursive
