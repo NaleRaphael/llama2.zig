@@ -1135,6 +1135,11 @@ pub fn main() !void {
         steps = 0;
     }
 
+    if (!std.mem.eql(u8, mode, "generate")) {
+        std.debug.print("[ERROR] Currently only 'generate' mode is supported.\n", .{});
+        std.process.exit(1);
+    }
+
     var transformer = Transformer{};
     try buildTransformer(&transformer, checkpoint_path, use_mmap, allocator);
     defer freeTransformer(&transformer, use_mmap, allocator);
