@@ -34,6 +34,14 @@ $ ./zig-out/bin/run models/stories15M.bin \
 (if you want to compare the output with llama2.c, remember to specify an
 identical seed)
 
+### Multithreading supports
+This program runs with single thread by default. If you want to run with more
+threads to checkout the performance boost, you can run with arguments
+`-w <N_THREADS>`.
+
+But please note that it's still an early implementation, don't take it too
+serious if you want to use it in your own benchmark.
+
 ## Tests
 To run tests, it currently requires installing `PyTorch` to load checkpoint for
 checking whether weights are correctly mapped.

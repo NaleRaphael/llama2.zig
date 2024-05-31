@@ -4,6 +4,10 @@ const assert = std.debug.assert;
 
 const VEC_SIZE_F32 = std.simd.suggestVectorLength(f32) orelse 4;
 
+var is_single_threaded: bool = true;
+var thread_pool: ?std.Thread.Pool = null;
+var wait_group: ?std.Thread.WaitGroup = null;
+
 // For model exported by `legacy_export()` (v0)
 // NOTE: We should use `extern struct` as it supports guaranteed layout.
 // Otherwise, `std.io.Reader.readStruct()` would fail.
@@ -332,7 +336,11 @@ pub fn softmax(x: []f32) void {
 
 /// Matrix multiplication: W (d,n) @ x (n,) -> xout (d,)
 pub fn matmul(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
-    matmul_simd(xout, x, w, n, d);
+    if (is_single_threaded) {
+        matmul_simd(xout, x, w, n, d);
+    } else {
+        matmul_simd_p(&thread_pool.?, &wait_group.?, xout, x, w, n, d);
+    }
 }
 
 fn matmul_simd(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
@@ -362,6 +370,52 @@ fn matmul_simd(xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
 
         xout[i] = val;
     }
+}
+
+fn matmul_simd_wg(wg: *std.Thread.WaitGroup, xout: []f32, x: []f32, w: []f32, n: usize, d: usize) void {
+    defer wg.finish();
+    matmul_simd(xout, x, w, n, d);
+}
+
+fn matmul_simd_p(
+    tp: *std.Thread.Pool,
+    wg: *std.Thread.WaitGroup,
+    xout: []f32,
+    x: []f32,
+    w: []f32,
+    n: usize,
+    d: usize,
+) void {
+    const n_threads = tp.threads.len;
+    const chunk_size: usize = d / n_threads;
+    const n_chk: usize = d / chunk_size;
+    const n_rem: usize = d % chunk_size;
+
+    for (0..n_chk) |i| {
+        wg.start();
+        tp.spawn(matmul_simd_wg, .{
+            wg,
+            xout[i * chunk_size ..][0..chunk_size],
+            x,
+            w[i * n * chunk_size ..][0 .. n * chunk_size],
+            n,
+            chunk_size,
+        }) catch unreachable;
+    }
+    if (n_rem != 0) {
+        wg.start();
+        tp.spawn(matmul_simd_wg, .{
+            wg,
+            xout[n_chk * chunk_size ..],
+            x,
+            w[n_chk * n * chunk_size ..],
+            n,
+            n_rem,
+        }) catch unreachable;
+    }
+
+    tp.waitAndWork(wg);
+    wg.reset();
 }
 
 /// Read checkpoint and initialize transformer. Note that user is responsible to
@@ -1000,7 +1054,8 @@ fn errorUsage() void {
         \\   -z <string> optional path to custom tokenizer
         \\   -m <string> mode: generate|chat, default: generate
         \\   -y <string> (optional) system prompt in chat mode
-        \\   -l <int>   (optional) use mmap for checkpoint (0: disable, 1: enable)
+        \\   -l <int>    (optional) use mmap for checkpoint (0: disable, 1: enable)
+        \\   -w <int>    (optional) number of threads to run with
     ;
     std.debug.print("{s}\n", .{msg});
     std.process.exit(1);
@@ -1029,6 +1084,7 @@ pub fn main() !void {
     var mode: []const u8 = "generate";
     var system_prompt: []const u8 = "";
     var use_mmap: bool = true;
+    var n_threads: u32 = 0;
 
     var i: usize = 2;
     while (i < args.len) : (i += 2) {
@@ -1061,6 +1117,8 @@ pub fn main() !void {
         } else if (arg[1] == 'l') {
             const tmp = try std.fmt.parseInt(u1, val, 0);
             use_mmap = if (tmp == 1) true else false;
+        } else if (arg[1] == 'w') {
+            n_threads = try std.fmt.parseUnsigned(u32, val, 10);
         } else {
             errorUsage();
         }
@@ -1078,6 +1136,12 @@ pub fn main() !void {
     }
     if (steps < 0) {
         steps = 0;
+    }
+
+    const MAX_CPU_COUNT: usize = try std.Thread.getCpuCount();
+    if (n_threads > MAX_CPU_COUNT) {
+        std.debug.print("[ERROR] Number of threads to run with should be <= {d}\n", .{MAX_CPU_COUNT});
+        std.process.exit(1);
     }
 
     if (!std.mem.eql(u8, mode, "generate")) {
@@ -1107,6 +1171,20 @@ pub fn main() !void {
     // Build sampler
     var sampler = try Sampler.init(32000, temperature, topp, rng_seed, allocator);
     defer sampler.deinit(allocator);
+
+    if (n_threads > 0) {
+        std.debug.print("[INFO] running with {d} thread(s)\n", .{n_threads});
+        is_single_threaded = false;
+        thread_pool = undefined;
+        try thread_pool.?.init(.{ .allocator = allocator, .n_jobs = @intCast(n_threads) });
+        wait_group = .{};
+    }
+
+    defer {
+        if (thread_pool) |*tp| {
+            tp.deinit();
+        }
+    }
 
     try generate(&transformer, &tokenizer, &sampler, prompt, steps, allocator);
 }
