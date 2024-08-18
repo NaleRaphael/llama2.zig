@@ -7,9 +7,16 @@
     ```bash
     $ git clone https://github.com/wolfpld/tracy
     $ cd tracy
-    $ git checkout v0.10
-    $ cd profiler/build/unix
-    $ make -j8 release
+    # We are using ztracy 0.12 which works for tracy 0.11
+    $ git checkout v0.11.0
+
+    # Specify source and binary directory, and pass compile options
+    # - If you are not using Wayland, you might need add flag `-DLEGACY=ON`
+    # - If you ran into any error and required modifying options, remember to
+    #   delete folder "profiler/build" and rerun this command again.
+    $ cmake -B profiler/build -S profiler -DCMAKE_BUILD_TYPE=Release
+
+    $ cmake --build profiler/build --config Release --parallel
     ```
     The build might fail because of missing/outdated libraries, consider my
     case to see whether it helps:
@@ -24,43 +31,10 @@
     # in tracy issues#582), so `glfw` is required.
     $ sudo apt install libglfw3-dev
 
-    # And the version of `capstone` on Ubuntu 20.04 (4.0.1+really+3.0.5-1build1) is
-    # outdated for tracy v0.10 (similar to tracy issue#484). Since I don't want to
-    # manipulate the system-side packages, here is my solution:
-    # 1. Clone libcapstone to local (inside tracy folder)
-    $ cd tracy
-    $ mkdir third_party && cd third_party
-    $ git clone https://github.com/libcapstone/libcapstone
-    # (9a486f5 is the latest commit for me at this moment, you can pick a stable tag)
-    $ cd libcapstone && git checkout 9a486f5
+    # `capstone` will be downloaded by CPM if it doesn't exist, so we don't need
+    # to build it manually as it's done for ztracy 0.11.
 
-    # 2. Build libcapstone and install artifacts to `build/dist`
-    $ mkdir -p build && cd build
-    $ cmake \
-        -DCMAKE_INSTALL_PREFIX=dist \
-        -DCAPSTONE_BUILD_TESTS=OFF \
-        -DCAPSTONE_INSTALL=ON \
-        ..
-    $ make -j8
-    $ cmake -P cmake_install.cmake
-
-    # 3. Go back to the folder of tracy server
-    $ cd ../../profiler/build/unix
-
-    # 4. In `legacy.mk`, replace dependency `capstone` with path of `capstone.pc`, e.g.,
-    # ```
-    # LIBCAPSTONE := ../../../third_party/libcapstone/build/dist/lib/pkgconfig/capstone.pc
-    # INCLUDES := $(shell pkg-config --cflags glfw3 freetype2 $(LIBCAPSTONE)) -I../../../imgui
-    # LIBS := $(shell pkg-config --libs glfw3 freetype2 $(LIBCAPSTONE)) -lpthread -ldl
-    # ```
-
-    # 5. Build tracy server
-    $ make -j8 LEGACY=1
-
-    # 6. Note that we need to set LD_LIBRARY_PATH while running the executable
-    # since shared libraries of `libcapstone` are not installed in default paths.
-    $ DIR_LIBCAPSTONE_DIST=`realpath ../../../third_party/libcapstone/build/dist`
-    $ LD_LIBRARY_PATH="${DIR_LIBCAPSTONE_DIST}/lib" ./Tracy-release
+    # Rerun the build command to see whether it works.
     ```
 
 [gh_tracy]: https://github.com/wolfpld/tracy

@@ -1,0 +1,14 @@
+.{
+    .name = "llama2.zig",
+    .version = "0.1.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "run.zig",
+        "README.md",
+    },
+    .dependencies = .{
+        .ztracy = .{ .path = "third_party/zig-gamedev/libs/ztracy" },
+    },
+}
+
